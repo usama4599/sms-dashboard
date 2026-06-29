@@ -1,7 +1,8 @@
-import { SERVICE_NAME, getCountry } from '../lib/constants'
+import { getService, getCountry } from '../lib/constants'
 
 export default function ClaimedNumberCard({ claimedNumber }) {
   const { number, cost_paid, claimed_at, phone_numbers } = claimedNumber
+  const service = getService(phone_numbers?.service)
   const country = getCountry(phone_numbers?.country)
 
   const formattedDate = new Date(claimed_at).toLocaleDateString('en-US', {
@@ -38,7 +39,7 @@ export default function ClaimedNumberCard({ claimedNumber }) {
       <div className="space-y-1.5 text-sm mb-3">
         <div className="flex justify-between">
           <span className="text-muted">Service</span>
-          <span className="text-white font-medium">{SERVICE_NAME}</span>
+          <span className="text-white font-medium">{service.label}</span>
         </div>
         <div className="flex justify-between">
           <span className="text-muted">Country</span>

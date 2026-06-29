@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { supabase } from '../lib/supabaseClient'
-import { SERVICE_NAME, getCountry } from '../lib/constants'
+import { getService, getCountry } from '../lib/constants'
 
 export default function PhoneNumberRow({ phoneNumber, onDeleted }) {
   const [deleting, setDeleting] = useState(false)
@@ -34,6 +34,7 @@ export default function PhoneNumberRow({ phoneNumber, onDeleted }) {
 
   const isClaimed = phoneNumber.status === 'claimed'
   const country = getCountry(phoneNumber.country)
+  const service = getService(phoneNumber.service)
 
   return (
     <tr>
@@ -43,7 +44,7 @@ export default function PhoneNumberRow({ phoneNumber, onDeleted }) {
         </span>
       </td>
       <td>
-        <span className="badge-primary">{SERVICE_NAME}</span>
+        <span className="badge-primary">{service.label}</span>
       </td>
       <td>
         <span className="badge-muted">{country.flag} {country.label}</span>

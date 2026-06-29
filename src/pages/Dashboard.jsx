@@ -3,15 +3,20 @@ import { supabase } from '../lib/supabaseClient'
 import { useAuth } from '../context/AuthContext'
 import Navbar from '../components/Navbar'
 import ClaimedNumberCard from '../components/ClaimedNumberCard'
-import { SERVICE_NAME, COUNTRIES } from '../lib/constants'
+import { PRODUCTS } from '../lib/constants'
+
+function productKey(service, country) {
+  return `${service}:${country}`
+}
 
 export default function Dashboard() {
   const { profile, credits, refreshProfile } = useAuth()
 
-  const [countryStats, setCountryStats] = useState({}) // { US: { count, price }, GB: {...}, CA: {...} }
+  const [productStats, setProductStats] = useState({}) // { "facebook:US": { count, price }, ... }
+  const [quantities, setQuantities] = useState({}) // { "facebook:US": "1", ... }
   const [claimedNumbers, setClaimedNumbers] = useState([])
   const [loadingData, setLoadingData] = useState(true)
-  const [claimingCode, setClaimingCode] = useState(null)
+  const [claimingKey, setClaimingKey] = useState(null)
   const [error, setError] = useState('')
   const [successMsg, setSuccessMsg] = useState('')
 
@@ -19,18 +24,19 @@ export default function Dashboard() {
     setError('')
 
     const [availableRes, claimedRes] = await Promise.all([
-      // "Available" = status = 'available' (this schema's not-claimed flag —
-      // there is no separate is_claimed boolean column, status IS that flag).
+      // "Available" = status = 'available'. We fetch every available row
+      // and bucket it by (service, country) client-side, so the count and
+      // price for each product card are always derived live from the table.
       supabase
         .from('phone_numbers')
-        .select('country, cost, created_at')
+        .select('service, country, cost, created_at')
         .eq('status', 'available')
         .order('created_at', { ascending: true }),
-      // RLS already scopes this to only the logged-in user's own rows.
-      // No limit — fetches every number this user has ever claimed.
+      // RLS scopes this to only the logged-in user's own rows. Joins
+      // phone_numbers(service, country) so each card can show what it is.
       supabase
         .from('claimed_numbers')
-        .select('id, number, cost_paid, claimed_at, phone_numbers(country)')
+        .select('id, number, cost_paid, claimed_at, phone_numbers(service, country)')
         .order('claimed_at', { ascending: false }),
     ])
 
@@ -38,24 +44,21 @@ export default function Dashboard() {
       setError(availableRes.error.message)
     } else {
       const stats = {}
-      for (const c of COUNTRIES) stats[c.code] = { count: 0, price: null }
+      for (const p of PRODUCTS) stats[productKey(p.service, p.country)] = { count: 0, price: null }
 
       for (const row of availableRes.data || []) {
-        const rawCountry = String(row.country || '').trim().toUpperCase()
-        const match = COUNTRIES.find(
-          (c) => c.code.toUpperCase() === rawCountry || c.label.toUpperCase() === rawCountry
-        )
-        if (!match) continue
+        const key = productKey(row.service, row.country)
+        if (!stats[key]) continue // ignore rows for service/country combos we don't have a card for
 
-        stats[match.code].count += 1
-        // Rows are ordered oldest-first, matching what claim_phone_number()
-        // will actually assign next, so the price shown is always accurate
-        // and read live from the database (phone_numbers.cost).
-        if (stats[match.code].price === null) {
-          stats[match.code].price = row.cost
+        stats[key].count += 1
+        // Rows are ordered oldest-first, matching what claim_phone_numbers_bulk()
+        // will actually assign first, so the price shown is always accurate
+        // and read live from phone_numbers.cost — never hardcoded.
+        if (stats[key].price === null) {
+          stats[key].price = row.cost
         }
       }
-      setCountryStats(stats)
+      setProductStats(stats)
     }
 
     if (claimedRes.error) {
@@ -71,36 +74,61 @@ export default function Dashboard() {
     fetchData()
   }, [fetchData])
 
-  const handleClaim = async (countryCode) => {
+  const getQuantity = (key) => {
+    const raw = quantities[key]
+    const parsed = parseInt(raw, 10)
+    return raw === undefined ? 1 : isNaN(parsed) ? '' : parsed
+  }
+
+  const setQuantity = (key, value) => {
+    setQuantities((prev) => ({ ...prev, [key]: value }))
+  }
+
+  const handleClaim = async (product) => {
+    const key = productKey(product.service, product.country)
+    const quantity = getQuantity(key)
+
     setError('')
     setSuccessMsg('')
-    setClaimingCode(countryCode)
 
+    if (!quantity || quantity <= 0) {
+      setError('Please enter a valid quantity (1 or more).')
+      return
+    }
+
+    setClaimingKey(key)
     try {
-      const { data, error: rpcError } = await supabase.rpc('claim_phone_number', {
-        p_country: countryCode,
+      const { data, error: rpcError } = await supabase.rpc('claim_phone_numbers_bulk', {
+        p_service: product.service,
+        p_country: product.country,
+        p_quantity: quantity,
       })
 
       if (rpcError) throw rpcError
 
-      setSuccessMsg(`Successfully claimed ${data.number}!`)
-      // Refresh credit balance, available counts, and the user's claimed list
-      // immediately — this is what makes "Available" drop instantly (e.g. 5 -> 4)
-      // and the new number appear in "My Numbers" without a page reload.
+      setSuccessMsg(
+        `Successfully claimed ${data.claimed_count} number${data.claimed_count !== 1 ? 's' : ''} for ${data.total_cost} credit${data.total_cost !== 1 ? 's' : ''}.`
+      )
+      setQuantity(key, '1')
+
+      // Refresh credit balance, available counts (instantly reflects e.g.
+      // 5 -> 4 after a claim), and the full "My Numbers" list.
       await Promise.all([refreshProfile(), fetchData()])
 
-      setTimeout(() => setSuccessMsg(''), 3500)
+      setTimeout(() => setSuccessMsg(''), 4000)
     } catch (err) {
-      const message = err.message || 'Failed to claim a number'
-      setError(
-        message.includes('Insufficient credits')
-          ? message
-          : message.includes('No numbers available')
-          ? 'No numbers are available for that country right now.'
-          : message
-      )
+      const message = err.message || 'Failed to claim numbers'
+      if (message.includes('Insufficient credits')) {
+        setError('Insufficient Credits')
+      } else if (message.includes('Only') && message.includes('currently available')) {
+        setError(message) // e.g. "Only 5 numbers are currently available."
+      } else if (message.includes('No numbers are available')) {
+        setError('No numbers are available for this selection right now.')
+      } else {
+        setError(message)
+      }
     } finally {
-      setClaimingCode(null)
+      setClaimingKey(null)
     }
   }
 
@@ -108,13 +136,13 @@ export default function Dashboard() {
     <div className="min-h-screen bg-background">
       <Navbar />
 
-      <main className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+      <main className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         <div className="mb-8">
           <h1 className="text-2xl font-semibold text-white">
             Welcome back{profile?.email ? `, ${profile.email.split('@')[0]}` : ''}
           </h1>
           <p className="text-muted text-sm mt-1">
-            Claim numbers from any available country below — there's no limit on how many you can own.
+            Choose a quantity and claim as many numbers as you need — no limit.
           </p>
         </div>
 
@@ -140,40 +168,35 @@ export default function Dashboard() {
           </div>
         )}
 
-        {/* ---------------- AVAILABLE NUMBERS (always visible, unlimited claiming) ---------------- */}
+        {/* ---------------- AVAILABLE NUMBERS (always visible, quantity claim) ---------------- */}
         <section className="mb-10">
           <h2 className="text-lg font-semibold text-white mb-4">Available Numbers</h2>
 
           {loadingData ? (
             <div className="card text-center text-muted text-sm py-10">Loading...</div>
           ) : (
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-              {COUNTRIES.map((country) => {
-                const stat = countryStats[country.code] || { count: 0, price: null }
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+              {PRODUCTS.map((product) => {
+                const key = productKey(product.service, product.country)
+                const stat = productStats[key] || { count: 0, price: null }
                 const outOfStock = stat.count === 0
-                const canAfford = stat.price !== null && credits >= stat.price
-                const isClaiming = claimingCode === country.code
-
-                // Only two reasons a button is ever disabled now: out of
-                // stock for that specific country, or not enough credits.
-                // There is NO "already own a number" restriction anymore.
-                const disabled = outOfStock || !canAfford || isClaiming
+                const quantity = getQuantity(key)
+                const totalCost = stat.price !== null && typeof quantity === 'number' ? stat.price * quantity : null
+                const canAfford = totalCost !== null && credits >= totalCost
+                const isClaiming = claimingKey === key
+                const disabled = outOfStock || isClaiming || !quantity || quantity <= 0 || !canAfford
 
                 let buttonLabel = 'Claim Number'
                 if (isClaiming) buttonLabel = 'Claiming...'
                 else if (outOfStock) buttonLabel = 'Out of Stock'
-                else if (!canAfford) buttonLabel = 'Insufficient Credits'
+                else if (totalCost !== null && !canAfford) buttonLabel = 'Insufficient Credits'
 
                 return (
-                  <div key={country.code} className="card flex flex-col items-center text-center">
-                    <span className="text-4xl mb-2">{country.flag}</span>
-                    <h3 className="text-base font-semibold text-white mb-3">{country.label}</h3>
+                  <div key={key} className="card flex flex-col items-center text-center">
+                    <span className="text-4xl mb-2">{product.flag}</span>
+                    <h3 className="text-base font-semibold text-white mb-3">{product.title}</h3>
 
                     <div className="w-full space-y-1.5 text-sm mb-4">
-                      <div className="flex justify-between">
-                        <span className="text-muted">Service</span>
-                        <span className="text-white font-medium">{SERVICE_NAME}</span>
-                      </div>
                       <div className="flex justify-between">
                         <span className="text-muted">Available</span>
                         <span className={outOfStock ? 'text-danger font-medium' : 'text-white font-medium'}>
@@ -186,18 +209,34 @@ export default function Dashboard() {
                           {stat.price !== null ? `${stat.price} Credits` : '—'}
                         </span>
                       </div>
+                      {totalCost !== null && quantity > 0 && (
+                        <div className="flex justify-between pt-1 border-t border-border">
+                          <span className="text-muted">Total</span>
+                          <span className="text-white font-semibold">{totalCost} Credits</span>
+                        </div>
+                      )}
                     </div>
 
+                    <label className="input-label w-full text-left">Claim Quantity</label>
+                    <input
+                      type="number"
+                      min="1"
+                      value={quantities[key] ?? '1'}
+                      onChange={(e) => setQuantity(key, e.target.value)}
+                      disabled={outOfStock || isClaiming}
+                      className="input-field text-center mb-3"
+                    />
+
                     <button
-                      onClick={() => handleClaim(country.code)}
+                      onClick={() => handleClaim(product)}
                       disabled={disabled}
                       className="btn-primary w-full"
                       title={
                         outOfStock
-                          ? 'No numbers available for this country'
+                          ? 'No numbers available for this selection'
                           : !canAfford
-                          ? 'Not enough credits'
-                          : 'Claim a number'
+                          ? 'Not enough credits for this quantity'
+                          : 'Claim numbers'
                       }
                     >
                       {buttonLabel}
@@ -219,10 +258,10 @@ export default function Dashboard() {
             <div className="card text-center text-muted text-sm py-10">Loading your numbers...</div>
           ) : claimedNumbers.length === 0 ? (
             <div className="card text-center text-muted text-sm py-10">
-              You haven't claimed any numbers yet. Claim one from the section above to get started.
+              You haven't claimed any numbers yet. Claim some from the section above to get started.
             </div>
           ) : (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
               {claimedNumbers.map((claim) => (
                 <ClaimedNumberCard key={claim.id} claimedNumber={claim} />
               ))}

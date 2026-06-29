@@ -3,7 +3,7 @@ import { supabase } from '../lib/supabaseClient'
 import Navbar from '../components/Navbar'
 import UserRow from '../components/UserRow'
 import PhoneNumberRow from '../components/PhoneNumberRow'
-import { SERVICE_NAME, COUNTRIES } from '../lib/constants'
+import { SERVICES, COUNTRIES, getService, getCountry } from '../lib/constants'
 
 const TABS = [
   { id: 'users', label: 'All Users' },
@@ -20,12 +20,21 @@ export default function AdminDashboard() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
 
-  const [newNumber, setNewNumber] = useState('')
-  const [newCountry, setNewCountry] = useState(COUNTRIES[0].code)
-  const [newCost, setNewCost] = useState('1')
-  const [addingNumber, setAddingNumber] = useState(false)
-  const [addError, setAddError] = useState('')
-  const [addSuccess, setAddSuccess] = useState('')
+  // Bulk add form state
+  const [bulkService, setBulkService] = useState(SERVICES[0].code)
+  const [bulkCountry, setBulkCountry] = useState(COUNTRIES[0].code)
+  const [bulkCost, setBulkCost] = useState('1')
+  const [bulkNumbersText, setBulkNumbersText] = useState('')
+  const [bulkAdding, setBulkAdding] = useState(false)
+  const [bulkError, setBulkError] = useState('')
+  const [bulkResult, setBulkResult] = useState(null) // { inserted, duplicates }
+
+  // USA Virtual Numbers only has one country (US) — lock it automatically.
+  useEffect(() => {
+    if (bulkService === 'usa_virtual') {
+      setBulkCountry('US')
+    }
+  }, [bulkService])
 
   const fetchAll = useCallback(async () => {
     setError('')
@@ -37,11 +46,11 @@ export default function AdminDashboard() {
         .order('created_at', { ascending: false }),
       supabase
         .from('phone_numbers')
-        .select('id, number, country, cost, status, created_at')
+        .select('id, number, country, service, cost, status, created_at')
         .order('created_at', { ascending: false }),
       supabase
         .from('claimed_numbers')
-        .select('id, number, cost_paid, claimed_at, user_id, users(email)')
+        .select('id, number, cost_paid, claimed_at, user_id, users(email), phone_numbers(service, country)')
         .order('claimed_at', { ascending: false }),
     ])
 
@@ -61,51 +70,46 @@ export default function AdminDashboard() {
     fetchAll()
   }, [fetchAll])
 
-  const handleAddNumber = async (e) => {
+  const handleBulkAdd = async (e) => {
     e.preventDefault()
-    setAddError('')
-    setAddSuccess('')
+    setBulkError('')
+    setBulkResult(null)
 
-    const trimmedNumber = newNumber.trim()
-    const parsedCost = parseInt(newCost, 10)
+    const lines = bulkNumbersText
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0)
 
-    if (!trimmedNumber) {
-      setAddError('Phone number is required')
+    const parsedCost = parseInt(bulkCost, 10)
+
+    if (lines.length === 0) {
+      setBulkError('Please paste at least one phone number (one per line).')
       return
     }
     if (isNaN(parsedCost) || parsedCost <= 0) {
-      setAddError('Cost must be a positive number')
+      setBulkError('Cost must be a positive number')
       return
     }
 
-    setAddingNumber(true)
+    setBulkAdding(true)
     try {
-      const { error: insertError } = await supabase
-        .from('phone_numbers')
-        .insert({
-          number: trimmedNumber,
-          country: newCountry,
-          cost: parsedCost,
-          status: 'available',
-        })
+      const { data, error: rpcError } = await supabase.rpc('admin_bulk_add_numbers', {
+        p_numbers: lines,
+        p_service: bulkService,
+        p_country: bulkCountry,
+        p_cost: parsedCost,
+      })
 
-      if (insertError) {
-        if (insertError.code === '23505') {
-          throw new Error('This phone number already exists')
-        }
-        throw insertError
-      }
+      if (rpcError) throw rpcError
 
-      setAddSuccess(`Number ${trimmedNumber} added successfully`)
-      setNewNumber('')
-      setNewCost('1')
+      setBulkResult({ inserted: data.inserted, duplicates: data.duplicates })
+      setBulkNumbersText('')
+      // No page refresh — just re-fetch the table data in place.
       await fetchAll()
-
-      setTimeout(() => setAddSuccess(''), 3000)
     } catch (err) {
-      setAddError(err.message || 'Failed to add number')
+      setBulkError(err.message || 'Failed to add numbers')
     } finally {
-      setAddingNumber(false)
+      setBulkAdding(false)
     }
   }
 
@@ -116,6 +120,13 @@ export default function AdminDashboard() {
   const totalCreditsInCirculation = users.reduce((sum, u) => sum + (u.credits || 0), 0)
   const availableCount = phoneNumbers.filter((n) => n.status === 'available').length
   const claimedCount = phoneNumbers.filter((n) => n.status === 'claimed').length
+
+  // Per-service breakdown for the Manage Numbers tab.
+  const serviceStats = SERVICES.map((s) => ({
+    ...s,
+    available: phoneNumbers.filter((n) => n.service === s.code && n.status === 'available').length,
+    claimed: phoneNumbers.filter((n) => n.service === s.code && n.status === 'claimed').length,
+  }))
 
   return (
     <div className="min-h-screen bg-background">
@@ -206,87 +217,121 @@ export default function AdminDashboard() {
 
             {activeTab === 'numbers' && (
               <section>
+                {/* Per-service quick stats */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6">
+                  {serviceStats.map((s) => (
+                    <div key={s.code} className="card">
+                      <h3 className="text-sm font-semibold text-white mb-2">{s.label}</h3>
+                      <div className="flex items-center gap-4 text-sm">
+                        <span className="text-muted">
+                          Available: <span className="text-success font-semibold">{s.available}</span>
+                        </span>
+                        <span className="text-muted">
+                          Claimed: <span className="text-primary-light font-semibold">{s.claimed}</span>
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Bulk Add Numbers */}
                 <div className="card mb-6">
-                  <h2 className="text-lg font-semibold text-white mb-4">Add New Number</h2>
+                  <h2 className="text-lg font-semibold text-white mb-1">Bulk Add Numbers</h2>
+                  <p className="text-muted text-sm mb-4">
+                    Paste one phone number per line. Blank lines and duplicates are skipped automatically.
+                  </p>
 
-                  {addError && (
+                  {bulkError && (
                     <div className="bg-danger/10 border border-danger/30 text-danger text-sm rounded-lg px-4 py-3 mb-4">
-                      {addError}
+                      {bulkError}
                     </div>
                   )}
-                  {addSuccess && (
-                    <div className="bg-success/10 border border-success/30 text-success text-sm rounded-lg px-4 py-3 mb-4">
-                      {addSuccess}
+                  {bulkResult && (
+                    <div className="bg-success/10 border border-success/30 text-success text-sm rounded-lg px-4 py-3 mb-4 space-y-0.5">
+                      <p>Successfully Added: {bulkResult.inserted}</p>
+                      <p>Duplicates Skipped: {bulkResult.duplicates}</p>
                     </div>
                   )}
 
-                  <form onSubmit={handleAddNumber} className="grid grid-cols-1 sm:grid-cols-4 gap-4">
-                    <div className="sm:col-span-2">
-                      <label className="input-label">Phone Number</label>
-                      <input
-                        type="text"
-                        value={newNumber}
-                        onChange={(e) => setNewNumber(e.target.value)}
-                        placeholder="+1 555 123 4567"
-                        disabled={addingNumber}
-                        className="input-field"
+                  <form onSubmit={handleBulkAdd} className="space-y-4">
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                      <div>
+                        <label className="input-label">Service</label>
+                        <select
+                          value={bulkService}
+                          onChange={(e) => setBulkService(e.target.value)}
+                          disabled={bulkAdding}
+                          className="input-field"
+                        >
+                          {SERVICES.map((s) => (
+                            <option key={s.code} value={s.code}>{s.label}</option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="input-label">Country</label>
+                        {bulkService === 'usa_virtual' ? (
+                          <input
+                            type="text"
+                            value="🇺🇸 USA"
+                            disabled
+                            className="input-field bg-surface-light text-muted cursor-not-allowed"
+                          />
+                        ) : (
+                          <select
+                            value={bulkCountry}
+                            onChange={(e) => setBulkCountry(e.target.value)}
+                            disabled={bulkAdding}
+                            className="input-field"
+                          >
+                            {COUNTRIES.map((c) => (
+                              <option key={c.code} value={c.code}>{c.flag} {c.label}</option>
+                            ))}
+                          </select>
+                        )}
+                      </div>
+
+                      <div>
+                        <label className="input-label">Price (credits per number)</label>
+                        <input
+                          type="number"
+                          min="1"
+                          value={bulkCost}
+                          onChange={(e) => setBulkCost(e.target.value)}
+                          disabled={bulkAdding}
+                          className="input-field"
+                          required
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="input-label">Phone Numbers (one per line)</label>
+                      <textarea
+                        value={bulkNumbersText}
+                        onChange={(e) => setBulkNumbersText(e.target.value)}
+                        placeholder={'+12025550111\n+12025550112\n+12025550113'}
+                        disabled={bulkAdding}
+                        rows={8}
+                        className="input-field font-mono resize-y"
                         required
                       />
                     </div>
 
-                    <div>
-                      <label className="input-label">Country</label>
-                      <select
-                        value={newCountry}
-                        onChange={(e) => setNewCountry(e.target.value)}
-                        disabled={addingNumber}
-                        className="input-field"
-                      >
-                        {COUNTRIES.map((c) => (
-                          <option key={c.code} value={c.code}>
-                            {c.flag} {c.label}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-
-                    <div>
-                      <label className="input-label">Cost (credits)</label>
-                      <input
-                        type="number"
-                        min="1"
-                        value={newCost}
-                        onChange={(e) => setNewCost(e.target.value)}
-                        disabled={addingNumber}
-                        className="input-field"
-                        required
-                      />
-                    </div>
-
-                    <div className="sm:col-span-4">
-                      <label className="input-label">Service</label>
-                      <input
-                        type="text"
-                        value={SERVICE_NAME}
-                        disabled
-                        className="input-field bg-surface-light text-muted cursor-not-allowed"
-                      />
-                    </div>
-
-                    <div className="sm:col-span-4">
-                      <button type="submit" disabled={addingNumber} className="btn-primary">
-                        {addingNumber ? 'Adding...' : 'Add Number'}
-                      </button>
-                    </div>
+                    <button type="submit" disabled={bulkAdding} className="btn-primary">
+                      {bulkAdding ? 'Adding...' : 'Add Numbers'}
+                    </button>
                   </form>
                 </div>
 
+                {/* Numbers table */}
                 <h2 className="text-lg font-semibold text-white mb-4">
                   All Numbers ({phoneNumbers.length})
                 </h2>
                 {phoneNumbers.length === 0 ? (
                   <div className="card text-center text-muted text-sm py-10">
-                    No numbers added yet. Use the form above to add one.
+                    No numbers added yet. Use the form above to add some.
                   </div>
                 ) : (
                   <div className="table-wrap">
@@ -328,33 +373,41 @@ export default function AdminDashboard() {
                       <thead>
                         <tr>
                           <th>Number</th>
+                          <th>Service</th>
+                          <th>Country</th>
                           <th>Claimed By</th>
                           <th>Cost Paid</th>
                           <th>Claimed At</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {claimedNumbers.map((c) => (
-                          <tr key={c.id}>
-                            <td className="font-medium text-white tracking-wide">{c.number}</td>
-                            <td className="text-muted">{c.users?.email ?? 'Unknown'}</td>
-                            <td>
-                              <span className="font-semibold text-white">{c.cost_paid}</span>
-                              <span className="text-muted text-xs ml-1">
-                                credit{c.cost_paid !== 1 ? 's' : ''}
-                              </span>
-                            </td>
-                            <td className="text-muted text-xs">
-                              {new Date(c.claimed_at).toLocaleDateString('en-US', {
-                                month: 'short',
-                                day: 'numeric',
-                                year: 'numeric',
-                                hour: '2-digit',
-                                minute: '2-digit',
-                              })}
-                            </td>
-                          </tr>
-                        ))}
+                        {claimedNumbers.map((c) => {
+                          const service = getService(c.phone_numbers?.service)
+                          const country = getCountry(c.phone_numbers?.country)
+                          return (
+                            <tr key={c.id}>
+                              <td className="font-medium text-white tracking-wide">{c.number}</td>
+                              <td><span className="badge-primary">{service.label}</span></td>
+                              <td><span className="badge-muted">{country.flag} {country.label}</span></td>
+                              <td className="text-muted">{c.users?.email ?? 'Unknown'}</td>
+                              <td>
+                                <span className="font-semibold text-white">{c.cost_paid}</span>
+                                <span className="text-muted text-xs ml-1">
+                                  credit{c.cost_paid !== 1 ? 's' : ''}
+                                </span>
+                              </td>
+                              <td className="text-muted text-xs">
+                                {new Date(c.claimed_at).toLocaleDateString('en-US', {
+                                  month: 'short',
+                                  day: 'numeric',
+                                  year: 'numeric',
+                                  hour: '2-digit',
+                                  minute: '2-digit',
+                                })}
+                              </td>
+                            </tr>
+                          )
+                        })}
                       </tbody>
                     </table>
                   </div>
