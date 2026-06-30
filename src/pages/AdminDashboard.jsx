@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useMemo } from 'react'
 import { supabase } from '../lib/supabaseClient'
 import Navbar from '../components/Navbar'
 import UserRow from '../components/UserRow'
@@ -20,6 +20,10 @@ export default function AdminDashboard() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
 
+  // Search state
+  const [userSearch, setUserSearch] = useState('')
+  const [numberSearch, setNumberSearch] = useState('')
+
   // Bulk add form state
   const [bulkService, setBulkService] = useState(SERVICES[0].code)
   const [bulkCountry, setBulkCountry] = useState(COUNTRIES[0].code)
@@ -28,6 +32,11 @@ export default function AdminDashboard() {
   const [bulkAdding, setBulkAdding] = useState(false)
   const [bulkError, setBulkError] = useState('')
   const [bulkResult, setBulkResult] = useState(null) // { inserted, duplicates }
+
+  // Delete All Available Numbers state
+  const [deletingAll, setDeletingAll] = useState(false)
+  const [deleteAllToast, setDeleteAllToast] = useState('')
+  const [deleteAllError, setDeleteAllError] = useState('')
 
   // USA Virtual Numbers only has one country (US) — lock it automatically.
   useEffect(() => {
@@ -104,7 +113,6 @@ export default function AdminDashboard() {
 
       setBulkResult({ inserted: data.inserted, duplicates: data.duplicates })
       setBulkNumbersText('')
-      // No page refresh — just re-fetch the table data in place.
       await fetchAll()
     } catch (err) {
       setBulkError(err.message || 'Failed to add numbers')
@@ -117,16 +125,80 @@ export default function AdminDashboard() {
     setPhoneNumbers((prev) => prev.filter((n) => n.id !== deletedId))
   }
 
+  const handleDeleteAllAvailable = async () => {
+    setDeleteAllError('')
+    setDeleteAllToast('')
+
+    const availableCountLocal = phoneNumbers.filter((n) => n.status === 'available').length
+
+    if (availableCountLocal === 0) {
+      setDeleteAllError('No available numbers to delete.')
+      setTimeout(() => setDeleteAllError(''), 3000)
+      return
+    }
+
+    const confirmed = window.confirm(
+      'Delete all available numbers? This action cannot be undone.'
+    )
+    if (!confirmed) return
+
+    setDeletingAll(true)
+    try {
+      // Server-side function does: DELETE FROM phone_numbers WHERE status =
+      // 'available'. It never touches claimed numbers, claimed_numbers,
+      // users, or credit_transactions — and self-checks role = 'admin'.
+      const { data, error: rpcError } = await supabase.rpc('admin_delete_available_numbers')
+
+      if (rpcError) throw rpcError
+
+      // Refresh the numbers list and dashboard stats from the database.
+      await fetchAll()
+
+      const count = data?.deleted_count ?? 0
+      setDeleteAllToast(`Successfully deleted ${count} available number${count !== 1 ? 's' : ''}.`)
+      setTimeout(() => setDeleteAllToast(''), 3500)
+    } catch (err) {
+      setDeleteAllError(err.message || 'Failed to delete available numbers')
+      setTimeout(() => setDeleteAllError(''), 4000)
+    } finally {
+      setDeletingAll(false)
+    }
+  }
+
   const totalCreditsInCirculation = users.reduce((sum, u) => sum + (u.credits || 0), 0)
   const availableCount = phoneNumbers.filter((n) => n.status === 'available').length
   const claimedCount = phoneNumbers.filter((n) => n.status === 'claimed').length
 
-  // Per-service breakdown for the Manage Numbers tab.
   const serviceStats = SERVICES.map((s) => ({
     ...s,
     available: phoneNumbers.filter((n) => n.service === s.code && n.status === 'available').length,
     claimed: phoneNumbers.filter((n) => n.service === s.code && n.status === 'claimed').length,
   }))
+
+  // ---------------- Filtered lists (instant, client-side) ----------------
+  const filteredUsers = useMemo(() => {
+    const q = userSearch.trim().toLowerCase()
+    if (!q) return users
+    return users.filter(
+      (u) => u.email?.toLowerCase().includes(q) || u.id?.toLowerCase().includes(q)
+    )
+  }, [users, userSearch])
+
+  const filteredPhoneNumbers = useMemo(() => {
+    const q = numberSearch.trim().toLowerCase()
+    if (!q) return phoneNumbers
+    return phoneNumbers.filter((n) => {
+      const serviceLabel = getService(n.service).label.toLowerCase()
+      const countryLabel = getCountry(n.country).label.toLowerCase()
+      return (
+        n.number?.toLowerCase().includes(q) ||
+        n.service?.toLowerCase().includes(q) ||
+        serviceLabel.includes(q) ||
+        n.country?.toLowerCase().includes(q) ||
+        countryLabel.includes(q)
+      )
+    })
+  }, [phoneNumbers, numberSearch])
 
   return (
     <div className="min-h-screen bg-background">
@@ -165,12 +237,12 @@ export default function AdminDashboard() {
           </div>
         )}
 
-        <div className="flex gap-2 border-b border-border mb-6">
+        <div className="flex gap-2 border-b border-border mb-6 overflow-x-auto">
           {TABS.map((tab) => (
             <button
               key={tab.id}
               onClick={() => setActiveTab(tab.id)}
-              className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-colors duration-150 ${
+              className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-colors duration-150 whitespace-nowrap ${
                 activeTab === tab.id
                   ? 'border-primary text-white'
                   : 'border-transparent text-muted hover:text-white'
@@ -185,13 +257,31 @@ export default function AdminDashboard() {
           <div className="card text-center text-muted text-sm py-10">Loading admin data...</div>
         ) : (
           <>
+            {/* ---------------- ALL USERS TAB ---------------- */}
             {activeTab === 'users' && (
               <section>
-                <h2 className="text-lg font-semibold text-white mb-4">
-                  All Users ({users.length})
-                </h2>
-                {users.length === 0 ? (
-                  <div className="card text-center text-muted text-sm py-10">No users found.</div>
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
+                  <h2 className="text-lg font-semibold text-white">
+                    All Users ({filteredUsers.length})
+                  </h2>
+                  <div className="relative w-full sm:w-72">
+                    <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-4.35-4.35M17 11a6 6 0 11-12 0 6 6 0 0112 0z" />
+                    </svg>
+                    <input
+                      type="text"
+                      value={userSearch}
+                      onChange={(e) => setUserSearch(e.target.value)}
+                      placeholder="Search by email or user ID..."
+                      className="input-field !pl-9"
+                    />
+                  </div>
+                </div>
+
+                {filteredUsers.length === 0 ? (
+                  <div className="card text-center text-muted text-sm py-10">
+                    No users found.
+                  </div>
                 ) : (
                   <div className="table-wrap">
                     <table className="app-table">
@@ -205,7 +295,7 @@ export default function AdminDashboard() {
                         </tr>
                       </thead>
                       <tbody>
-                        {users.map((u) => (
+                        {filteredUsers.map((u) => (
                           <UserRow key={u.id} user={u} onCreditsUpdated={fetchAll} />
                         ))}
                       </tbody>
@@ -215,6 +305,7 @@ export default function AdminDashboard() {
               </section>
             )}
 
+            {/* ---------------- MANAGE NUMBERS TAB ---------------- */}
             {activeTab === 'numbers' && (
               <section>
                 {/* Per-service quick stats */}
@@ -325,13 +416,53 @@ export default function AdminDashboard() {
                   </form>
                 </div>
 
-                {/* Numbers table */}
-                <h2 className="text-lg font-semibold text-white mb-4">
-                  All Numbers ({phoneNumbers.length})
-                </h2>
-                {phoneNumbers.length === 0 ? (
+                {/* Delete All Available Numbers + toast/error feedback */}
+                {deleteAllToast && (
+                  <div className="bg-success/10 border border-success/30 text-success text-sm rounded-lg px-4 py-3 mb-4 animate-fade-in">
+                    {deleteAllToast}
+                  </div>
+                )}
+                {deleteAllError && (
+                  <div className="bg-danger/10 border border-danger/30 text-danger text-sm rounded-lg px-4 py-3 mb-4 animate-fade-in">
+                    {deleteAllError}
+                  </div>
+                )}
+
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
+                  <h2 className="text-lg font-semibold text-white">
+                    All Numbers ({filteredPhoneNumbers.length})
+                  </h2>
+
+                  <div className="flex flex-col sm:flex-row gap-3 w-full sm:w-auto">
+                    <div className="relative w-full sm:w-72">
+                      <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-4.35-4.35M17 11a6 6 0 11-12 0 6 6 0 0112 0z" />
+                      </svg>
+                      <input
+                        type="text"
+                        value={numberSearch}
+                        onChange={(e) => setNumberSearch(e.target.value)}
+                        placeholder="Search number, service, or country..."
+                        className="input-field !pl-9"
+                      />
+                    </div>
+
+                    <button
+                      onClick={handleDeleteAllAvailable}
+                      disabled={deletingAll}
+                      className="btn-danger whitespace-nowrap"
+                      title="Permanently delete every available (unclaimed) phone number"
+                    >
+                      {deletingAll ? 'Deleting...' : 'Delete All Available Numbers'}
+                    </button>
+                  </div>
+                </div>
+
+                {filteredPhoneNumbers.length === 0 ? (
                   <div className="card text-center text-muted text-sm py-10">
-                    No numbers added yet. Use the form above to add some.
+                    {phoneNumbers.length === 0
+                      ? 'No numbers added yet. Use the form above to add some.'
+                      : 'No numbers match your search.'}
                   </div>
                 ) : (
                   <div className="table-wrap">
@@ -348,7 +479,7 @@ export default function AdminDashboard() {
                         </tr>
                       </thead>
                       <tbody>
-                        {phoneNumbers.map((n) => (
+                        {filteredPhoneNumbers.map((n) => (
                           <PhoneNumberRow key={n.id} phoneNumber={n} onDeleted={handleNumberDeleted} />
                         ))}
                       </tbody>
@@ -358,6 +489,7 @@ export default function AdminDashboard() {
               </section>
             )}
 
+            {/* ---------------- CLAIMED NUMBERS TAB ---------------- */}
             {activeTab === 'claimed' && (
               <section>
                 <h2 className="text-lg font-semibold text-white mb-4">
