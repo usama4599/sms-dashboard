@@ -31,18 +31,15 @@ export default function AdminDashboard() {
   const [bulkNumbersText, setBulkNumbersText] = useState('')
   const [bulkAdding, setBulkAdding] = useState(false)
   const [bulkError, setBulkError] = useState('')
-  const [bulkResult, setBulkResult] = useState(null) // { inserted, duplicates }
+  const [bulkResult, setBulkResult] = useState(null)
 
   // Delete All Available Numbers state
   const [deletingAll, setDeletingAll] = useState(false)
   const [deleteAllToast, setDeleteAllToast] = useState('')
   const [deleteAllError, setDeleteAllError] = useState('')
 
-  // USA Virtual Numbers only has one country (US) — lock it automatically.
   useEffect(() => {
-    if (bulkService === 'usa_virtual') {
-      setBulkCountry('US')
-    }
+    if (bulkService === 'usa_virtual') setBulkCountry('US')
   }, [bulkService])
 
   const fetchAll = useCallback(async () => {
@@ -53,13 +50,19 @@ export default function AdminDashboard() {
         .from('users')
         .select('id, email, role, credits, created_at')
         .order('created_at', { ascending: false }),
+      // Include deleted_by_user_id + deleted_at so PhoneNumberRow can
+      // display full "Deleted by User" details in the Status column.
       supabase
         .from('phone_numbers')
-        .select('id, number, country, service, cost, status, created_at')
+        .select(
+          'id, number, country, service, cost, status, created_at, deleted_by_user_id, deleted_at'
+        )
         .order('created_at', { ascending: false }),
       supabase
         .from('claimed_numbers')
-        .select('id, number, cost_paid, claimed_at, user_id, users(email), phone_numbers(service, country)')
+        .select(
+          'id, number, cost_paid, claimed_at, user_id, users(email), phone_numbers(service, country)'
+        )
         .order('claimed_at', { ascending: false }),
     ])
 
@@ -144,18 +147,15 @@ export default function AdminDashboard() {
 
     setDeletingAll(true)
     try {
-      // Server-side function does: DELETE FROM phone_numbers WHERE status =
-      // 'available'. It never touches claimed numbers, claimed_numbers,
-      // users, or credit_transactions — and self-checks role = 'admin'.
       const { data, error: rpcError } = await supabase.rpc('admin_delete_available_numbers')
-
       if (rpcError) throw rpcError
 
-      // Refresh the numbers list and dashboard stats from the database.
       await fetchAll()
 
       const count = data?.deleted_count ?? 0
-      setDeleteAllToast(`Successfully deleted ${count} available number${count !== 1 ? 's' : ''}.`)
+      setDeleteAllToast(
+        `Successfully deleted ${count} available number${count !== 1 ? 's' : ''}.`
+      )
       setTimeout(() => setDeleteAllToast(''), 3500)
     } catch (err) {
       setDeleteAllError(err.message || 'Failed to delete available numbers')
@@ -166,13 +166,14 @@ export default function AdminDashboard() {
   }
 
   const totalCreditsInCirculation = users.reduce((sum, u) => sum + (u.credits || 0), 0)
-  const availableCount = phoneNumbers.filter((n) => n.status === 'available').length
-  const claimedCount = phoneNumbers.filter((n) => n.status === 'claimed').length
+  const availableCount    = phoneNumbers.filter((n) => n.status === 'available').length
+  const claimedCount      = phoneNumbers.filter((n) => n.status === 'claimed').length
+  const deletedByUserCount = phoneNumbers.filter((n) => n.status === 'deleted_by_user').length
 
   const serviceStats = SERVICES.map((s) => ({
     ...s,
     available: phoneNumbers.filter((n) => n.service === s.code && n.status === 'available').length,
-    claimed: phoneNumbers.filter((n) => n.service === s.code && n.status === 'claimed').length,
+    claimed:   phoneNumbers.filter((n) => n.service === s.code && n.status === 'claimed').length,
   }))
 
   // ---------------- Filtered lists (instant, client-side) ----------------
@@ -195,7 +196,8 @@ export default function AdminDashboard() {
         n.service?.toLowerCase().includes(q) ||
         serviceLabel.includes(q) ||
         n.country?.toLowerCase().includes(q) ||
-        countryLabel.includes(q)
+        countryLabel.includes(q) ||
+        n.status?.toLowerCase().includes(q)
       )
     })
   }, [phoneNumbers, numberSearch])
@@ -212,6 +214,7 @@ export default function AdminDashboard() {
           </p>
         </div>
 
+        {/* Stat cards — now includes Deleted by User count */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
           <div className="stat-card">
             <span className="text-muted text-sm">Total Users</span>
@@ -230,6 +233,18 @@ export default function AdminDashboard() {
             <span className="text-3xl font-bold text-primary-light">{claimedCount}</span>
           </div>
         </div>
+
+        {/* Secondary stat: Deleted by User */}
+        {deletedByUserCount > 0 && (
+          <div className="card mb-6 flex items-center gap-3 py-3">
+            <span className="badge bg-warning/10 text-warning border border-warning/20">
+              Deleted by User
+            </span>
+            <span className="text-muted text-sm">
+              {deletedByUserCount} number{deletedByUserCount !== 1 ? 's' : ''} were deleted by users and removed from circulation.
+            </span>
+          </div>
+        )}
 
         {error && (
           <div className="bg-danger/10 border border-danger/30 text-danger text-sm rounded-lg px-4 py-3 mb-6">
@@ -279,9 +294,7 @@ export default function AdminDashboard() {
                 </div>
 
                 {filteredUsers.length === 0 ? (
-                  <div className="card text-center text-muted text-sm py-10">
-                    No users found.
-                  </div>
+                  <div className="card text-center text-muted text-sm py-10">No users found.</div>
                 ) : (
                   <div className="table-wrap">
                     <table className="app-table">
@@ -315,10 +328,12 @@ export default function AdminDashboard() {
                       <h3 className="text-sm font-semibold text-white mb-2">{s.label}</h3>
                       <div className="flex items-center gap-4 text-sm">
                         <span className="text-muted">
-                          Available: <span className="text-success font-semibold">{s.available}</span>
+                          Available:{' '}
+                          <span className="text-success font-semibold">{s.available}</span>
                         </span>
                         <span className="text-muted">
-                          Claimed: <span className="text-primary-light font-semibold">{s.claimed}</span>
+                          Claimed:{' '}
+                          <span className="text-primary-light font-semibold">{s.claimed}</span>
                         </span>
                       </div>
                     </div>
@@ -416,7 +431,7 @@ export default function AdminDashboard() {
                   </form>
                 </div>
 
-                {/* Delete All Available Numbers + toast/error feedback */}
+                {/* Delete All Available + feedback toasts */}
                 {deleteAllToast && (
                   <div className="bg-success/10 border border-success/30 text-success text-sm rounded-lg px-4 py-3 mb-4 animate-fade-in">
                     {deleteAllToast}
@@ -480,7 +495,11 @@ export default function AdminDashboard() {
                       </thead>
                       <tbody>
                         {filteredPhoneNumbers.map((n) => (
-                          <PhoneNumberRow key={n.id} phoneNumber={n} onDeleted={handleNumberDeleted} />
+                          <PhoneNumberRow
+                            key={n.id}
+                            phoneNumber={n}
+                            onDeleted={handleNumberDeleted}
+                          />
                         ))}
                       </tbody>
                     </table>

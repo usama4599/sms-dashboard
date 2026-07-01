@@ -12,8 +12,8 @@ function productKey(service, country) {
 export default function Dashboard() {
   const { profile, credits, refreshProfile } = useAuth()
 
-  const [productStats, setProductStats] = useState({}) // { "facebook:US": { count, price }, ... }
-  const [quantities, setQuantities] = useState({}) // { "facebook:US": "1", ... }
+  const [productStats, setProductStats] = useState({})
+  const [quantities, setQuantities] = useState({})
   const [claimedNumbers, setClaimedNumbers] = useState([])
   const [loadingData, setLoadingData] = useState(true)
   const [claimingKey, setClaimingKey] = useState(null)
@@ -24,16 +24,14 @@ export default function Dashboard() {
     setError('')
 
     const [availableRes, claimedRes] = await Promise.all([
-      // "Available" = status = 'available'. We fetch every available row
-      // and bucket it by (service, country) client-side, so the count and
-      // price for each product card are always derived live from the table.
       supabase
         .from('phone_numbers')
         .select('service, country, cost, created_at')
         .eq('status', 'available')
         .order('created_at', { ascending: true }),
-      // RLS scopes this to only the logged-in user's own rows. Joins
-      // phone_numbers(service, country) so each card can show what it is.
+      // RLS scopes this to the logged-in user's own rows only.
+      // Rows deleted via user_delete_claimed_number() are removed from this
+      // table entirely, so they never appear here.
       supabase
         .from('claimed_numbers')
         .select('id, number, cost_paid, claimed_at, phone_numbers(service, country)')
@@ -48,12 +46,9 @@ export default function Dashboard() {
 
       for (const row of availableRes.data || []) {
         const key = productKey(row.service, row.country)
-        if (!stats[key]) continue // ignore rows for service/country combos we don't have a card for
+        if (!stats[key]) continue
 
         stats[key].count += 1
-        // Rows are ordered oldest-first, matching what claim_phone_numbers_bulk()
-        // will actually assign first, so the price shown is always accurate
-        // and read live from phone_numbers.cost — never hardcoded.
         if (stats[key].price === null) {
           stats[key].price = row.cost
         }
@@ -111,8 +106,6 @@ export default function Dashboard() {
       )
       setQuantity(key, '1')
 
-      // Refresh credit balance, available counts (instantly reflects e.g.
-      // 5 -> 4 after a claim), and the full "My Numbers" list.
       await Promise.all([refreshProfile(), fetchData()])
 
       setTimeout(() => setSuccessMsg(''), 4000)
@@ -121,7 +114,7 @@ export default function Dashboard() {
       if (message.includes('Insufficient credits')) {
         setError('Insufficient Credits')
       } else if (message.includes('Only') && message.includes('currently available')) {
-        setError(message) // e.g. "Only 5 numbers are currently available."
+        setError(message)
       } else if (message.includes('No numbers are available')) {
         setError('No numbers are available for this selection right now.')
       } else {
@@ -130,6 +123,13 @@ export default function Dashboard() {
     } finally {
       setClaimingKey(null)
     }
+  }
+
+  // Removes a card from local state the moment the user confirms deletion
+  // inside ClaimedNumberCard. No full re-fetch needed — the RPC already
+  // deleted the claimed_numbers row and marked the phone_number retired.
+  const handleNumberDeleted = (deletedId) => {
+    setClaimedNumbers((prev) => prev.filter((c) => c.id !== deletedId))
   }
 
   return (
@@ -142,7 +142,7 @@ export default function Dashboard() {
             Welcome back{profile?.email ? `, ${profile.email.split('@')[0]}` : ''}
           </h1>
           <p className="text-muted text-sm mt-1">
-            Choose a quantity and claim as many numbers as you need — no limit.
+            Claim numbers from any available category — no limit on how many you can own.
           </p>
         </div>
 
@@ -168,7 +168,7 @@ export default function Dashboard() {
           </div>
         )}
 
-        {/* ---------------- AVAILABLE NUMBERS (always visible, quantity claim) ---------------- */}
+        {/* ---------------- AVAILABLE NUMBERS (always visible) ---------------- */}
         <section className="mb-10">
           <h2 className="text-lg font-semibold text-white mb-4">Available Numbers</h2>
 
@@ -181,7 +181,10 @@ export default function Dashboard() {
                 const stat = productStats[key] || { count: 0, price: null }
                 const outOfStock = stat.count === 0
                 const quantity = getQuantity(key)
-                const totalCost = stat.price !== null && typeof quantity === 'number' ? stat.price * quantity : null
+                const totalCost =
+                  stat.price !== null && typeof quantity === 'number'
+                    ? stat.price * quantity
+                    : null
                 const canAfford = totalCost !== null && credits >= totalCost
                 const isClaiming = claimingKey === key
                 const disabled = outOfStock || isClaiming || !quantity || quantity <= 0 || !canAfford
@@ -200,7 +203,9 @@ export default function Dashboard() {
                       <div className="flex justify-between">
                         <span className="text-muted">Available</span>
                         <span className={outOfStock ? 'text-danger font-medium' : 'text-white font-medium'}>
-                          {outOfStock ? 'Out of Stock' : `${stat.count} Number${stat.count !== 1 ? 's' : ''}`}
+                          {outOfStock
+                            ? 'Out of Stock'
+                            : `${stat.count} Number${stat.count !== 1 ? 's' : ''}`}
                         </span>
                       </div>
                       <div className="flex justify-between">
@@ -233,9 +238,9 @@ export default function Dashboard() {
                       className="btn-primary w-full"
                       title={
                         outOfStock
-                          ? 'No numbers available for this selection'
+                          ? 'No numbers available'
                           : !canAfford
-                          ? 'Not enough credits for this quantity'
+                          ? 'Not enough credits'
                           : 'Claim numbers'
                       }
                     >
@@ -248,14 +253,16 @@ export default function Dashboard() {
           )}
         </section>
 
-        {/* ---------------- MY NUMBERS (every number this user has ever claimed) ---------------- */}
+        {/* ---------------- MY NUMBERS ---------------------------------------- */}
         <section>
           <h2 className="text-lg font-semibold text-white mb-4">
             My Numbers {claimedNumbers.length > 0 ? `(${claimedNumbers.length})` : ''}
           </h2>
 
           {loadingData ? (
-            <div className="card text-center text-muted text-sm py-10">Loading your numbers...</div>
+            <div className="card text-center text-muted text-sm py-10">
+              Loading your numbers...
+            </div>
           ) : claimedNumbers.length === 0 ? (
             <div className="card text-center text-muted text-sm py-10">
               You haven't claimed any numbers yet. Claim some from the section above to get started.
@@ -263,7 +270,11 @@ export default function Dashboard() {
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
               {claimedNumbers.map((claim) => (
-                <ClaimedNumberCard key={claim.id} claimedNumber={claim} />
+                <ClaimedNumberCard
+                  key={claim.id}
+                  claimedNumber={claim}
+                  onDeleted={handleNumberDeleted}
+                />
               ))}
             </div>
           )}
