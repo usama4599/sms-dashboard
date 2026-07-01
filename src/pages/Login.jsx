@@ -42,8 +42,9 @@ export default function Login() {
   return (
     <div className="min-h-screen flex items-center justify-center bg-background px-4">
       <div className="w-full max-w-md">
+        {/* Brand */}
         <div className="flex items-center justify-center gap-2.5 mb-8">
-          <div className="h-10 w-10 rounded-lg bg-primary flex items-center justify-center font-bold text-lg">
+          <div className="h-10 w-10 rounded-lg bg-primary flex items-center justify-center font-bold text-lg text-white">
             S
           </div>
           <span className="text-xl font-semibold text-white tracking-tight">
@@ -78,7 +79,17 @@ export default function Login() {
             </div>
 
             <div>
-              <label htmlFor="password" className="input-label">Password</label>
+              {/* Label row: "Password" on the left, "Forgot Password?" on the right */}
+              <div className="flex items-center justify-between mb-1.5">
+                <label htmlFor="password" className="input-label !mb-0">Password</label>
+                <Link
+                  to="/forgot-password"
+                  className="text-xs text-primary-light hover:underline"
+                  tabIndex={-1} // keep tab flow on the input, not the link
+                >
+                  Forgot Password?
+                </Link>
+              </div>
               <input
                 id="password"
                 type="password"
@@ -92,7 +103,11 @@ export default function Login() {
               />
             </div>
 
-            <button type="submit" disabled={loading} className="btn-primary w-full mt-2">
+            <button
+              type="submit"
+              disabled={loading}
+              className="btn-primary w-full mt-2"
+            >
               {loading ? 'Logging in...' : 'Log In'}
             </button>
           </form>
